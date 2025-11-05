@@ -18,6 +18,7 @@ try:
     from parser.llama_parser import CandidateParser
     from integrations.sheets import GoogleSheetsWriter
     from integrations.sv_portal import SVPortalUploader
+    from integrations.drive import GoogleDriveFetcher
 except ImportError:
     # Fallback for running from parent directory
     import sys
@@ -27,6 +28,7 @@ except ImportError:
     from parser.llama_parser import CandidateParser
     from integrations.sheets import GoogleSheetsWriter
     from integrations.sv_portal import SVPortalUploader
+    from integrations.drive import GoogleDriveFetcher
 
 # Configure logging
 logging.basicConfig(
@@ -57,24 +59,32 @@ class CandidateFileHandler(FileSystemEventHandler):
         self.sheets_writer = sheets_writer
         self.portal_uploader = portal_uploader
         self.processed_hashes_file = processed_hashes_file
-        self.processed_hashes = self._load_processed_hashes()
+        self.processed_hashes, self.processed_drive_ids = self._load_processed_hashes()
         self.supported_extensions = {'.pdf', '.docx', '.doc'}
     
     def _load_processed_hashes(self) -> set:
-        """Load set of processed file hashes."""
+        """Load set of processed file hashes and Drive file IDs."""
         try:
             if os.path.exists(self.processed_hashes_file):
                 with open(self.processed_hashes_file, 'r') as f:
                     data = json.load(f)
-                    return set(data.get('hashes', []))
+                    hashes = set(data.get('hashes', []))
+                    # Also load Drive file IDs if present
+                    drive_ids = set(data.get('drive_file_ids', []))
+                    return hashes, drive_ids
         except Exception as e:
             logger.error(f"Error loading processed hashes: {e}")
-        return set()
+        return set(), set()
     
     def _save_processed_hashes(self):
-        """Save processed file hashes to file."""
+        """Save processed file hashes and Drive file IDs to file."""
         try:
-            data = {'hashes': list(self.processed_hashes)}
+            hashes = self.processed_hashes if isinstance(self.processed_hashes, set) else set()
+            drive_ids = self.processed_drive_ids if hasattr(self, 'processed_drive_ids') else set()
+            data = {
+                'hashes': list(hashes),
+                'drive_file_ids': list(drive_ids)
+            }
             with open(self.processed_hashes_file, 'w') as f:
                 json.dump(data, f)
         except Exception as e:
@@ -100,12 +110,16 @@ class CandidateFileHandler(FileSystemEventHandler):
             return True
         return False
     
-    def _mark_as_processed(self, file_path: str):
-        """Mark file as processed by adding its hash."""
+    def _mark_as_processed(self, file_path: str, drive_file_id: str = None):
+        """Mark file as processed by adding its hash and optionally Drive file ID."""
         file_hash = self._calculate_file_hash(file_path)
         if file_hash:
             self.processed_hashes.add(file_hash)
-            self._save_processed_hashes()
+        if drive_file_id:
+            if not hasattr(self, 'processed_drive_ids'):
+                self.processed_drive_ids = set()
+            self.processed_drive_ids.add(drive_file_id)
+        self._save_processed_hashes()
     
     def _process_file(self, file_path: str):
         """
@@ -163,23 +177,29 @@ class CandidateFileHandler(FileSystemEventHandler):
             except Exception as e:
                 logger.error(f"Error uploading to Google Sheets: {e}")
             
-            # Upload to SV Portal
+            # Upload to SV Portal (if configured)
             portal_success = False
-            try:
-                portal_success = self.portal_uploader.upload_candidate(candidate_data)
-                if portal_success:
-                    logger.info(f"Successfully uploaded {candidate_id} to SV Portal")
-                else:
-                    logger.error(f"Failed to upload {candidate_id} to SV Portal")
-            except Exception as e:
-                logger.error(f"Error uploading to SV Portal: {e}")
+            if self.portal_uploader:
+                try:
+                    portal_success = self.portal_uploader.upload_candidate(candidate_data)
+                    if portal_success:
+                        logger.info(f"Successfully uploaded {candidate_id} to SV Portal")
+                    else:
+                        logger.error(f"Failed to upload {candidate_id} to SV Portal")
+                except Exception as e:
+                    logger.error(f"Error uploading to SV Portal: {e}")
+            else:
+                logger.info(f"Skipping SV Portal upload (not configured)")
             
             # Mark as processed if at least one upload succeeded
             if sheets_success or portal_success:
                 self._mark_as_processed(file_path)
                 logger.info(f"Successfully processed {file_path}")
             else:
-                logger.error(f"Failed to process {file_path} - both uploads failed")
+                if self.portal_uploader:
+                    logger.error(f"Failed to process {file_path} - both uploads failed")
+                else:
+                    logger.error(f"Failed to process {file_path} - Google Sheets upload failed")
             
         except Exception as e:
             logger.error(f"Error processing file {file_path}: {e}", exc_info=True)
@@ -201,8 +221,8 @@ class CandidateWatcher:
     
     def __init__(self):
         """Initialize the watcher with all components."""
-        # Validate configuration
-        Config.validate()
+        # Validate configuration (SV Portal optional)
+        Config.validate(require_sv_portal=False)
         
         # Initialize parser
         self.parser = CandidateParser(
@@ -217,12 +237,42 @@ class CandidateWatcher:
             service_account_json=Config.GOOGLE_SERVICE_ACCOUNT_JSON
         )
         
-        # Initialize SV Portal uploader
-        self.portal_uploader = SVPortalUploader(
-            portal_url=Config.SV_PORTAL_URL,
-            email=Config.SV_ADMIN_EMAIL,
-            password=Config.SV_ADMIN_PASSWORD
-        )
+        # Initialize SV Portal uploader (optional)
+        self.portal_uploader = None
+        if Config.SV_PORTAL_URL and Config.SV_ADMIN_EMAIL and Config.SV_ADMIN_PASSWORD:
+            self.portal_uploader = SVPortalUploader(
+                portal_url=Config.SV_PORTAL_URL,
+                email=Config.SV_ADMIN_EMAIL,
+                password=Config.SV_ADMIN_PASSWORD
+            )
+            logger.info("SV Portal uploader initialized")
+        else:
+            logger.info("SV Portal not configured - skipping portal uploads")
+        
+        # Initialize Google Drive fetcher (optional)
+        self.drive_fetcher = None
+        drive_folder_id = Config.GOOGLE_DRIVE_FOLDER_ID
+        
+        # Extract folder ID from URL if provided
+        if not drive_folder_id and Config.GOOGLE_DRIVE_FOLDER_URL:
+            # Extract folder ID from common URL formats
+            url = Config.GOOGLE_DRIVE_FOLDER_URL
+            if 'folders/' in url:
+                drive_folder_id = url.split('folders/')[-1].split('?')[0].split('&')[0]
+            elif 'id=' in url:
+                drive_folder_id = url.split('id=')[-1].split('&')[0].split('#')[0]
+            elif len(url) > 10 and '/' not in url and '?' not in url:
+                # Already an ID
+                drive_folder_id = url
+        
+        if drive_folder_id:
+            self.drive_fetcher = GoogleDriveFetcher(
+                service_account_json=Config.GOOGLE_SERVICE_ACCOUNT_JSON,
+                drive_folder_id=drive_folder_id
+            )
+            logger.info(f"Google Drive fetcher initialized for folder: {drive_folder_id}")
+        else:
+            logger.info("Google Drive not configured - will only watch local folder")
         
         # Initialize file handler
         self.event_handler = CandidateFileHandler(
@@ -239,6 +289,10 @@ class CandidateWatcher:
             Config.WATCH_FOLDER,
             recursive=False
         )
+        
+        # Drive polling thread
+        self.drive_polling_active = False
+        self.drive_thread = None
     
     def start(self):
         """Start watching the folder."""
@@ -253,6 +307,59 @@ class CandidateWatcher:
         # Start observer
         self.observer.start()
         logger.info("File watcher started")
+        
+        # Start Google Drive polling if configured
+        if self.drive_fetcher:
+            self.drive_polling_active = True
+            self.drive_thread = threading.Thread(target=self._drive_poll_loop, daemon=True)
+            self.drive_thread.start()
+            logger.info(f"Google Drive polling started (interval: {Config.DRIVE_POLL_INTERVAL}s)")
+    
+    def _drive_poll_loop(self):
+        """Continuously poll Google Drive for new files."""
+        import time
+        
+        while self.drive_polling_active:
+            try:
+                logger.info("Polling Google Drive for new files...")
+                
+                # Get processed Drive file IDs
+                processed_ids = self.event_handler.processed_drive_ids if hasattr(self.event_handler, 'processed_drive_ids') else set()
+                
+                # List files in Drive
+                files = self.drive_fetcher.list_files()
+                
+                for file_info in files:
+                    file_id = file_info.get('id')
+                    
+                    # Skip if already processed
+                    if file_id in processed_ids:
+                        continue
+                    
+                    # Download file
+                    logger.info(f"Downloading new file from Drive: {file_info.get('name')}")
+                    file_path = self.drive_fetcher.download_file(
+                        file_id=file_id,
+                        file_name=file_info.get('name', 'unknown'),
+                        download_path=Config.WATCH_FOLDER
+                    )
+                    
+                    if file_path:
+                        # Mark Drive file ID as processed
+                        if not hasattr(self.event_handler, 'processed_drive_ids'):
+                            self.event_handler.processed_drive_ids = set()
+                        self.event_handler.processed_drive_ids.add(file_id)
+                        self.event_handler._save_processed_hashes()
+                        
+                        # The file watcher will pick it up automatically
+                        logger.info(f"Downloaded file from Drive: {file_path}")
+                
+                # Wait before next poll
+                time.sleep(Config.DRIVE_POLL_INTERVAL)
+                
+            except Exception as e:
+                logger.error(f"Error in Drive polling: {e}", exc_info=True)
+                time.sleep(60)  # Wait 1 minute before retrying on error
     
     def _process_existing_files(self):
         """Process any existing files in the watch folder."""
@@ -266,6 +373,9 @@ class CandidateWatcher:
     
     def stop(self):
         """Stop watching the folder."""
+        self.drive_polling_active = False
+        if self.drive_thread:
+            self.drive_thread.join(timeout=5)
         self.observer.stop()
         self.observer.join()
         logger.info("File watcher stopped")
