@@ -1,0 +1,32 @@
+# Core dependencies
+watchdog==3.0.0
+pdfminer.six==20221105
+pytesseract==0.3.10
+Pillow==10.1.0
+pdf2image==1.16.3
+python-docx==1.1.0
+llama-cpp-python==0.2.20
+
+# Google APIs
+google-api-python-client==2.108.0
+google-auth==2.25.2
+google-auth-httplib2==0.1.1
+google-auth-oauthlib==1.1.0
+
+# HTTP and automation
+requests==2.31.0
+playwright==1.40.0
+
+# Web framework
+Flask==3.0.0
+
+# Utilities
+python-dotenv==1.0.0
+jsonschema==4.20.0
+
+# Optional: For better OCR support
+# tesseract-ocr (system package, install separately)
+# poppler-utils (system package, install separately for pdf2image)
+
+
+

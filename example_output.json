@@ -1,0 +1,54 @@
+{
+  "identity": {
+    "candidate_id": "A1B2C3D4",
+    "name": "John Doe",
+    "designation": "Software Engineer",
+    "email": "john.doe@example.com",
+    "phone": "+919876543210",
+    "dob": "1990-05-15",
+    "gender": "Male",
+    "nationality": "Indian"
+  },
+  "documents": {
+    "pan_number": "ABCDE1234F",
+    "uan_number": "123456789012",
+    "passport_number": "A1234567",
+    "valid_from": "2020-01-01",
+    "valid_to": "2030-01-01"
+  },
+  "education": [
+    {
+      "degree": "Bachelor of Technology",
+      "institution": "Indian Institute of Technology",
+      "year": "2012",
+      "percentage": "85.5"
+    },
+    {
+      "degree": "Master of Science",
+      "institution": "Stanford University",
+      "year": "2014",
+      "percentage": "90.0"
+    }
+  ],
+  "experience": [
+    {
+      "company": "Tech Corp",
+      "position": "Junior Software Engineer",
+      "duration": "2014-2017",
+      "description": "Developed web applications using Python and JavaScript"
+    },
+    {
+      "company": "Innovation Labs",
+      "position": "Senior Software Engineer",
+      "duration": "2017-2023",
+      "description": "Led development of microservices architecture"
+    }
+  ],
+  "addresses": {
+    "current": "123 Main Street, Bangalore, Karnataka 560001, India",
+    "permanent": "456 Park Avenue, Mumbai, Maharashtra 400001, India"
+  }
+}
+
+
+
